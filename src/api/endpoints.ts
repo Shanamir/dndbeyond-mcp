@@ -58,6 +58,8 @@ export const ENDPOINTS = {
     classes: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/classes`,
     races: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/races`,
     backgrounds: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/backgrounds`,
+    spells: (classId: number, classLevel: number = 20) =>
+      `${DDB_CHARACTER_SERVICE}/character/v5/game-data/spells?classId=${classId}&classLevel=${classLevel}&sharingSetting=2`,
     alwaysKnownSpells: (classId: number, classLevel: number = 20) =>
       `${DDB_CHARACTER_SERVICE}/character/v5/game-data/always-known-spells?classId=${classId}&classLevel=${classLevel}&sharingSetting=2`,
     alwaysPreparedSpells: (classId: number, classLevel: number = 20) =>

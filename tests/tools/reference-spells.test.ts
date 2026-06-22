@@ -123,8 +123,8 @@ describe("searchSpells", () => {
 
   it("should fetch cantrips and spells from separate API calls", async () => {
     const mockGet = vi.fn()
-      .mockResolvedValueOnce([createMockSpell("Fire Bolt", 0, "Evocation")]) // classLevel=1
-      .mockResolvedValueOnce([createMockSpell("Magic Missile", 1, "Evocation")]); // classLevel=20
+      .mockResolvedValueOnce([createMockSpell("Fire Bolt", 0, "Evocation")]) // /game-data/spells
+      .mockResolvedValueOnce([createMockSpell("Magic Missile", 1, "Evocation")]); // always-known
 
     mockClient = {
       get: mockGet,
@@ -133,8 +133,8 @@ describe("searchSpells", () => {
 
     await searchSpells(mockClient, {});
 
-    // Should call get for each of 8 classes, 4 times each (known cantrips, known spells, prepared cantrips, prepared spells)
-    expect(mockGet).toHaveBeenCalledTimes(32);
+    // Should call get for each of 8 classes, 3 times each (full spell list, always-known, always-prepared)
+    expect(mockGet).toHaveBeenCalledTimes(24);
   });
 });
 

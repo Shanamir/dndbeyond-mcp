@@ -135,14 +135,15 @@ const SPELL_CLASS_ID_MAP: Record<number, string> = {
 };
 
 /**
- * Loads the full spell compendium by querying always-known-spells and always-prepared-spells for all classes.
- * Queries both classLevel=1 (for cantrips/level 0 spells) and classLevel=20 (for levels 1-9).
+ * Loads the full spell compendium including cantrips.
+ * Primary source: /game-data/spells (requires auth, returns full class spell list including level 0 cantrips).
+ * Supplemental: always-known-spells and always-prepared-spells for subclass/innate spells not in the main list.
  * Deduplicates by spell definition name.
  */
 async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
   const allSpells = new Map<string, DdbSpell>();
   let failureCount = 0;
-  const totalRequests = SPELLCASTING_CLASS_IDS.length * 4; // 2 for known, 2 for prepared
+  const totalRequests = SPELLCASTING_CLASS_IDS.length * 3;
 
   const addSpell = (spell: DdbSpell, className: string) => {
     if (!spell.definition?.name) return;
@@ -158,23 +159,11 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
   for (const classId of SPELLCASTING_CLASS_IDS) {
     const className = SPELL_CLASS_ID_MAP[classId] ?? `Class${classId}`;
 
-    // Fetch cantrips (level 0) by querying at classLevel=1
-    try {
-      const cantrips = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysKnownSpells(classId, 1),
-        `spell-compendium:class:${classId}:cantrips`,
-        86_400_000, // 24h
-      );
-      for (const spell of cantrips ?? []) addSpell(spell, className);
-    } catch {
-      failureCount++;
-    }
-
-    // Fetch higher-level spells (levels 1-9) by querying at classLevel=20
+    // Primary: full class spell list (includes cantrips at level 0), requires auth
     try {
       const spells = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysKnownSpells(classId, 20),
-        `spell-compendium:class:${classId}`,
+        ENDPOINTS.gameData.spells(classId, 20),
+        `spell-compendium:class:${classId}:all`,
         86_400_000, // 24h
       );
       for (const spell of spells ?? []) addSpell(spell, className);
@@ -182,19 +171,19 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
       failureCount++;
     }
 
-    // Fetch always-prepared cantrips (level 0) by querying at classLevel=1
+    // Supplemental: always-known spells (innate/auto-granted, e.g. subclass spells)
     try {
-      const preparedCantrips = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 1),
-        `spell-compendium:class:${classId}:prepared-cantrips`,
+      const knownSpells = await client.get<DdbSpell[]>(
+        ENDPOINTS.gameData.alwaysKnownSpells(classId, 20),
+        `spell-compendium:class:${classId}:known`,
         86_400_000, // 24h
       );
-      for (const spell of preparedCantrips ?? []) addSpell(spell, className);
+      for (const spell of knownSpells ?? []) addSpell(spell, className);
     } catch {
       failureCount++;
     }
 
-    // Fetch always-prepared spells (levels 1-9) by querying at classLevel=20
+    // Supplemental: always-prepared spells (domain spells, subclass spells)
     try {
       const preparedSpells = await client.get<DdbSpell[]>(
         ENDPOINTS.gameData.alwaysPreparedSpells(classId, 20),

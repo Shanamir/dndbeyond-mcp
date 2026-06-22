@@ -57,26 +57,36 @@ function formatSpellList(char: DdbCharacter): string {
     ...(char.spells.background ?? []),
     ...(char.spells.item ?? []),
     ...(char.spells.feat ?? []),
+    ...(char.classSpells ?? []).flatMap((cs) => cs.spells ?? []),
   ];
 
   if (allSpells.length === 0) return "No spells available.";
 
-  const prepared = allSpells.filter((s) => s.prepared || s.alwaysPrepared);
-  const preparedByLevel = prepared.reduce((acc, spell) => {
+  const cantrips = allSpells.filter((s) => s.definition.level === 0);
+  const prepared = allSpells.filter((s) => s.definition.level > 0 && (s.prepared || s.alwaysPrepared));
+
+  const byLevel: Record<number, string[]> = {};
+  for (const spell of cantrips) {
+    if (!byLevel[0]) byLevel[0] = [];
+    byLevel[0].push(spell.definition.name);
+  }
+  for (const spell of prepared) {
     const level = spell.definition.level;
-    if (!acc[level]) acc[level] = [];
-    acc[level].push(spell.definition.name);
-    return acc;
-  }, {} as Record<number, string[]>);
+    if (!byLevel[level]) byLevel[level] = [];
+    const label = spell.alwaysPrepared ? `${spell.definition.name} *` : spell.definition.name;
+    byLevel[level].push(label);
+  }
+
+  if (Object.keys(byLevel).length === 0) return `No prepared spells for ${char.name}.`;
 
   const lines = [
-    `Prepared Spells for ${char.name}:`,
+    `Spells for ${char.name}:`,
     "",
-    ...Object.entries(preparedByLevel)
+    ...Object.entries(byLevel)
       .sort(([a], [b]) => Number(a) - Number(b))
       .map(([level, spells]) => {
         const levelLabel = level === "0" ? "Cantrips" : `Level ${level}`;
-        return `${levelLabel}:\n  ${spells.join(", ")}`;
+        return `${levelLabel}:\n  ${spells.sort().join(", ")}`;
       }),
   ];
 
