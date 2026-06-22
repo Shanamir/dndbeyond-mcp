@@ -1,10 +1,11 @@
 export interface SpellSearchParams {
   name?: string;
   level?: number;
-  class?: string;
+  className?: string;
   school?: string;
   concentration?: boolean;
   ritual?: boolean;
+  source?: string;
 }
 
 export interface MonsterSearchParams {

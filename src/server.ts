@@ -1,5 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import express from "express";
+import cors from "cors";
 import { z } from "zod";
 import { TtlCache } from "./cache/lru.js";
 import { CircuitBreaker, RateLimiter } from "./resilience/index.js";
@@ -676,7 +679,7 @@ export async function startServer(): Promise<void> {
   // Register reference tools - spells
   server.tool(
     "search_spells",
-    "Search the full spell compendium by name, level, school, concentration, or ritual",
+    "Search the full spell compendium by name, level, school, concentration, ritual, class, or source book",
     {
       name: z.string().optional().describe("Spell name (partial match)"),
       level: z.coerce.number().optional().describe("Spell level (0-9, 0=cantrip)"),
@@ -686,6 +689,14 @@ export async function startServer(): Promise<void> {
         .describe("School of magic (e.g., evocation, abjuration)"),
       concentration: z.boolean().optional().describe("Requires concentration"),
       ritual: z.boolean().optional().describe("Can be cast as ritual"),
+      className: z
+        .string()
+        .optional()
+        .describe("Class name to filter by (e.g., Cleric, Wizard, Druid)"),
+      source: z
+        .string()
+        .optional()
+        .describe("Source book name to filter by (partial match, e.g., \"Player's Handbook\", \"Xanathar's Guide\")"),
     },
     async (params) =>
       searchSpells(client, {
@@ -694,6 +705,8 @@ export async function startServer(): Promise<void> {
         school: params.school,
         concentration: params.concentration,
         ritual: params.ritual,
+        className: params.className,
+        source: params.source,
       })
   );
 
@@ -889,19 +902,53 @@ export async function startServer(): Promise<void> {
       })
   );
 
-  // Connect via stdio transport
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  const useHttp = process.env.MCP_TRANSPORT === "http";
 
-  // Handle graceful shutdown
-  const shutdown = async () => {
-    console.error("dndbeyond-mcp: shutting down...");
-    await server.close();
-    process.exit(0);
-  };
+  if (useHttp) {
+    const port = parseInt(process.env.MCP_PORT ?? "3100", 10);
+    const app = express();
+    app.use(cors());
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+    const transports = new Map<string, SSEServerTransport>();
 
-  console.error("dndbeyond-mcp: server running");
+    app.get("/sse", (req, res) => {
+      const transport = new SSEServerTransport("/message", res);
+      transports.set(transport.sessionId, transport);
+      res.on("close", () => transports.delete(transport.sessionId));
+      server.connect(transport);
+    });
+
+    app.post("/message", express.json(), (req, res) => {
+      const sessionId = req.query.sessionId as string;
+      const transport = transports.get(sessionId);
+      if (!transport) { res.status(404).send("Session not found"); return; }
+      transport.handlePostMessage(req, res);
+    });
+
+    const httpServer = app.listen(port, () => {
+      console.error(`dndbeyond-mcp: HTTP/SSE server running on http://localhost:${port}/sse`);
+    });
+
+    const shutdown = async () => {
+      console.error("dndbeyond-mcp: shutting down...");
+      httpServer.close();
+      await server.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+  } else {
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+
+    const shutdown = async () => {
+      console.error("dndbeyond-mcp: shutting down...");
+      await server.close();
+      process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+
+    console.error("dndbeyond-mcp: server running");
+  }
 }

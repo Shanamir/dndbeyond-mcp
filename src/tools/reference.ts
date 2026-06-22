@@ -119,8 +119,20 @@ interface DdbMonster {
 
 // --- Spell compendium ---
 
-// Class IDs for building the full spell compendium
-const SPELLCASTING_CLASS_IDS = [1, 2, 3, 4, 5, 6, 7, 8]; // Bard through Wizard
+// Class IDs for building the full spell compendium (game-data API, not entity IDs)
+// Alphabetical order: Bard=1, Cleric=2, Druid=3, Paladin=4, Ranger=5, Sorcerer=6, Warlock=7, Wizard=8
+const SPELLCASTING_CLASS_IDS = [1, 2, 3, 4, 5, 6, 7, 8];
+
+const SPELL_CLASS_ID_MAP: Record<number, string> = {
+  1: "Bard",
+  2: "Cleric",
+  3: "Druid",
+  4: "Paladin",
+  5: "Ranger",
+  6: "Sorcerer",
+  7: "Warlock",
+  8: "Wizard",
+};
 
 /**
  * Loads the full spell compendium by querying always-known-spells and always-prepared-spells for all classes.
@@ -132,7 +144,20 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
   let failureCount = 0;
   const totalRequests = SPELLCASTING_CLASS_IDS.length * 4; // 2 for known, 2 for prepared
 
+  const addSpell = (spell: DdbSpell, className: string) => {
+    if (!spell.definition?.name) return;
+    const existing = allSpells.get(spell.definition.name);
+    if (existing) {
+      if (!existing._classes) existing._classes = [];
+      if (!existing._classes.includes(className)) existing._classes.push(className);
+    } else {
+      allSpells.set(spell.definition.name, { ...spell, _classes: [className] });
+    }
+  };
+
   for (const classId of SPELLCASTING_CLASS_IDS) {
+    const className = SPELL_CLASS_ID_MAP[classId] ?? `Class${classId}`;
+
     // Fetch cantrips (level 0) by querying at classLevel=1
     try {
       const cantrips = await client.get<DdbSpell[]>(
@@ -140,12 +165,7 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
         `spell-compendium:class:${classId}:cantrips`,
         86_400_000, // 24h
       );
-
-      for (const spell of cantrips ?? []) {
-        if (spell.definition?.name && !allSpells.has(spell.definition.name)) {
-          allSpells.set(spell.definition.name, spell);
-        }
-      }
+      for (const spell of cantrips ?? []) addSpell(spell, className);
     } catch {
       failureCount++;
     }
@@ -157,12 +177,7 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
         `spell-compendium:class:${classId}`,
         86_400_000, // 24h
       );
-
-      for (const spell of spells ?? []) {
-        if (spell.definition?.name && !allSpells.has(spell.definition.name)) {
-          allSpells.set(spell.definition.name, spell);
-        }
-      }
+      for (const spell of spells ?? []) addSpell(spell, className);
     } catch {
       failureCount++;
     }
@@ -174,12 +189,7 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
         `spell-compendium:class:${classId}:prepared-cantrips`,
         86_400_000, // 24h
       );
-
-      for (const spell of preparedCantrips ?? []) {
-        if (spell.definition?.name && !allSpells.has(spell.definition.name)) {
-          allSpells.set(spell.definition.name, spell);
-        }
-      }
+      for (const spell of preparedCantrips ?? []) addSpell(spell, className);
     } catch {
       failureCount++;
     }
@@ -191,12 +201,7 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
         `spell-compendium:class:${classId}:prepared`,
         86_400_000, // 24h
       );
-
-      for (const spell of preparedSpells ?? []) {
-        if (spell.definition?.name && !allSpells.has(spell.definition.name)) {
-          allSpells.set(spell.definition.name, spell);
-        }
-      }
+      for (const spell of preparedSpells ?? []) addSpell(spell, className);
     } catch {
       failureCount++;
     }
@@ -224,6 +229,17 @@ export async function searchSpells(
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load spell compendium";
     return { content: [{ type: "text", text: message }] };
+  }
+
+  // Build source lookup map from config
+  let sourceMap: Map<number, string> = new Map();
+  try {
+    const config = await getGameConfig(client);
+    if (config.sources) {
+      for (const s of config.sources) sourceMap.set(s.id, s.name);
+    }
+  } catch {
+    // source names will fall back to IDs
   }
 
   let matchedSpells = allSpells;
@@ -260,6 +276,36 @@ export async function searchSpells(
     );
   }
 
+  if (params.className) {
+    const searchClass = params.className.toLowerCase();
+    matchedSpells = matchedSpells.filter((spell) =>
+      spell._classes?.some((c) => c.toLowerCase().includes(searchClass))
+    );
+  }
+
+  if (params.source) {
+    const searchSource = params.source.toLowerCase();
+    // Resolve source name to ID(s) using config map
+    const matchedSourceIds = new Set<number>();
+    for (const [id, name] of sourceMap) {
+      if (name.toLowerCase().includes(searchSource) || searchSource.includes(name.toLowerCase())) {
+        matchedSourceIds.add(id);
+      }
+    }
+    matchedSpells = matchedSpells.filter((spell) => {
+      const sources = spell.definition.sources;
+      if (!sources || sources.length === 0) return false;
+      if (matchedSourceIds.size > 0) {
+        return sources.some((s) => matchedSourceIds.has(s.sourceId));
+      }
+      // If we couldn't resolve the name, fall back to string match on resolved names
+      return sources.some((s) => {
+        const name = sourceMap.get(s.sourceId) ?? "";
+        return name.toLowerCase().includes(searchSource);
+      });
+    });
+  }
+
   // Sort by level then name
   matchedSpells.sort((a, b) => {
     if (a.definition.level !== b.definition.level) return a.definition.level - b.definition.level;
@@ -272,7 +318,8 @@ export async function searchSpells(
     };
   }
 
-  const lines = [`# Spell Search Results (${matchedSpells.length} found)\n`];
+  const classLabel = params.className ? ` for ${params.className}` : "";
+  const lines = [`# Spell Search Results${classLabel} (${matchedSpells.length} found)\n`];
   for (const spell of matchedSpells) {
     const level = spell.definition.level === 0 ? "Cantrip" : `Level ${spell.definition.level}`;
     const tags = [];
@@ -280,8 +327,14 @@ export async function searchSpells(
     if (spell.definition.ritual) tags.push("Ritual");
     const tagStr = tags.length > 0 ? ` (${tags.join(", ")})` : "";
 
+    const sources = spell.definition.sources ?? [];
+    const sourceNames = sources
+      .map((s) => sourceMap.get(s.sourceId) ?? `Source #${s.sourceId}`)
+      .filter((v, i, arr) => arr.indexOf(v) === i);
+    const sourceStr = sourceNames.length > 0 ? ` [${sourceNames.join(", ")}]` : "";
+
     lines.push(
-      `- **${spell.definition.name}** — ${level}, ${spell.definition.school}${tagStr}`
+      `- **${spell.definition.name}** — ${level}, ${spell.definition.school}${tagStr}${sourceStr}`
     );
   }
 

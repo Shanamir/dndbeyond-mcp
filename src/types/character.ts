@@ -1,4 +1,5 @@
 export interface DdbCharacter {
+  _domainSpells?: DdbSpell[]; // injected after fetch, not from API
   id: number;
   readonlyUrl: string;
   name: string;
@@ -18,6 +19,7 @@ export interface DdbCharacter {
   lifestyleId: number;
   currencies: DdbCurrencies;
   spells: DdbSpellsContainer;
+  classSpells: DdbClassSpells[] | null;
   inventory: DdbInventoryItem[];
   deathSaves: DdbDeathSaves;
   traits: DdbTraits;
@@ -92,8 +94,14 @@ export interface DdbSpellsContainer {
   feat: DdbSpell[] | null;
 }
 
+export interface DdbClassSpells {
+  id: number;
+  spells: DdbSpell[] | null;
+}
+
 export interface DdbSpell {
   id: number;
+  _classes?: string[]; // injected during compendium load, not from API
   definition: {
     name: string;
     level: number;
@@ -118,6 +126,7 @@ export interface DdbSpell {
     componentsDescription: string | null;
     concentration: boolean;
     ritual: boolean;
+    sources?: Array<{ sourceId: number; sourcePageNumber?: number | null }>;
   };
   prepared: boolean;
   alwaysPrepared: boolean;

@@ -1,6 +1,7 @@
 import type { DdbClient } from "../api/client.js";
 import { ENDPOINTS } from "../api/endpoints.js";
 import { HttpError } from "../resilience/index.js";
+import { getUserId, saveUserId } from "../api/auth.js";
 import type {
   DdbCharacter,
   DdbAction,
@@ -60,22 +61,34 @@ function formatSpells(char: DdbCharacter): string {
 
   if (allSpells.length === 0) return StringUtils.EMPTY;
 
-  const prepared = allSpells.filter((s) => s.prepared || s.alwaysPrepared);
+  const cantrips = allSpells.filter((s) => s.definition.level === 0);
+  const prepared = allSpells.filter((s) => s.definition.level > 0 && (s.prepared || s.alwaysPrepared));
+
+  const sections: string[] = [];
+
+  if (cantrips.length > 0) {
+    const names = cantrips.map((s) => s.definition.name).sort();
+    sections.push(`  Cantrips: ${names.join(", ")}`);
+  }
+
   const preparedByLevel = prepared.reduce((acc, spell) => {
     const level = spell.definition.level;
     if (!acc[level]) acc[level] = [];
-    acc[level].push(spell.definition.name);
+    const label = spell.alwaysPrepared ? `${spell.definition.name} *` : spell.definition.name;
+    acc[level].push(label);
     return acc;
   }, {} as Record<number, string[]>);
 
-  const lines = Object.entries(preparedByLevel)
+  const levelLines = Object.entries(preparedByLevel)
     .sort(([a], [b]) => Number(a) - Number(b))
-    .map(([level, spells]) => {
-      const levelLabel = level === "0" ? "Cantrips" : `Level ${level}`;
-      return `  ${levelLabel}: ${spells.join(", ")}`;
-    });
+    .map(([level, spells]) => `  Level ${level}: ${spells.join(", ")}`);
 
-  return `\nPrepared Spells:\n${lines.join("\n")}`;
+  sections.push(...levelLines);
+
+  if (sections.length === 0) return StringUtils.EMPTY;
+
+  const legend = prepared.some((s) => s.alwaysPrepared) ? "\n  (* = always prepared / domain spell)" : StringUtils.EMPTY;
+  return `\nPrepared Spells:\n${sections.join("\n")}${legend}`;
 }
 
 function formatInventory(char: DdbCharacter): string {
@@ -101,7 +114,34 @@ function getAllSpells(char: DdbCharacter): DdbSpell[] {
     ...(char.spells.background ?? []),
     ...(char.spells.item ?? []),
     ...(char.spells.feat ?? []),
+    ...(char.classSpells ?? []).flatMap((cs) => cs.spells ?? []),
+    ...(char._domainSpells ?? []),
   ];
+}
+
+async function fetchDomainSpells(client: DdbClient, char: DdbCharacter): Promise<DdbSpell[]> {
+  const results: DdbSpell[] = [];
+  const existingNames = new Set(getAllSpells(char).map((s) => s.definition.name));
+
+  for (const cls of char.classes) {
+    if (!cls.subclassDefinition) continue;
+    try {
+      const spells = await client.get<DdbSpell[]>(
+        ENDPOINTS.gameData.alwaysPreparedSpells(cls.definition.id, cls.level),
+        `domain-spells:${cls.definition.id}:${cls.level}`,
+        3_600_000
+      );
+      for (const spell of spells ?? []) {
+        if (spell.definition?.name && !existingNames.has(spell.definition.name)) {
+          results.push({ ...spell, alwaysPrepared: true });
+          existingNames.add(spell.definition.name);
+        }
+      }
+    } catch {
+      // domain spells are supplementary — silently skip on failure
+    }
+  }
+  return results;
 }
 
 function stripHtml(s: string | null | undefined): string {
@@ -820,7 +860,9 @@ function formatCharacterFull(char: DdbCharacter): string {
 
   // Spells
   const allSpells = getAllSpells(char);
-  const preparedSpells = allSpells.filter((s) => s.prepared || s.alwaysPrepared);
+  const preparedSpells = allSpells.filter(
+    (s) => s.definition.level === 0 || s.prepared || s.alwaysPrepared
+  );
   if (preparedSpells.length > 0) {
     const spellDefs = preparedSpells
       .sort((a, b) => a.definition.level - b.definition.level || a.definition.name.localeCompare(b.definition.name))
@@ -989,6 +1031,8 @@ export async function getCharacter(
     60_000
   );
 
+  character._domainSpells = await fetchDomainSpells(client, character);
+
   const detail = params.detail ?? "sheet";
   let text: string;
   switch (detail) {
@@ -1007,68 +1051,38 @@ export async function getCharacter(
   return { content: [{ type: "text", text }] };
 }
 
+
 export async function listCharacters(
   client: DdbClient
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
-  const campaignsResponse = await client.get<DdbCampaign[]>(
-    ENDPOINTS.campaign.list(),
-    "campaigns",
-    300_000
-  );
-
-  // Fetch characters from each campaign using the characters endpoint
-  const allCharacters: Array<{ id: number; name: string; campaignName: string }> = [];
-  for (const campaign of campaignsResponse) {
-    const characters = await client.get<DdbCampaignCharacter2[]>(
-      ENDPOINTS.campaign.characters(campaign.id),
-      `campaign:${campaign.id}:characters`,
-      300_000
-    );
-    allCharacters.push(...characters.map((char) => ({
-      id: char.id,
-      name: char.name,
-      campaignName: campaign.name,
-    })));
+  let userId = await getUserId();
+  if (!userId) {
+    return { content: [{ type: "text", text: "Could not determine userId. Please re-run setup or provide your D&D Beyond user ID." }] };
   }
 
-  if (allCharacters.length === 0) {
-    return {
-      content: [
-        {
-          type: "text",
-          text: "No characters found.",
-        },
-      ],
-    };
+  // Fetch all characters for this user
+  const rawCharsResponse = await client.getRaw<{ id: number; success: boolean; data: { characters: Array<{ id: number; name: string; level: number; raceName: string; classDescription: string; campaignId: number | null; campaignName: string | null }> } }>(
+    ENDPOINTS.character.list(userId),
+    `characters:${userId}`,
+    60_000
+  );
+
+  const allChars = rawCharsResponse?.data?.characters ?? [];
+
+  if (allChars.length === 0) {
+    return { content: [{ type: "text", text: "No characters found." }] };
   }
 
-  const characterDetails = await Promise.all(
-    allCharacters.map(async (char) => {
-      const details = await client.get<DdbCharacter>(
-        ENDPOINTS.character.get(char.id),
-        `character:${char.id}`,
-        60_000
-      );
-      return {
-        name: details.name,
-        race: details.race.fullName,
-        classes: formatClasses(details),
-        level: computeLevel(details),
-        campaign: char.campaignName,
-      };
-    })
-  );
-
-  const lines = characterDetails.map(
-    (char) =>
-      `${char.name} - ${char.race} ${char.classes} (Level ${char.level}) - ${char.campaign}`
-  );
+  const lines = allChars.map((char) => {
+    const campaign = char.campaignName ?? "No campaign";
+    return `• ${char.name} [ID: ${char.id}] — ${char.raceName} ${char.classDescription} (Level ${char.level}) — ${campaign}`;
+  });
 
   return {
     content: [
       {
         type: "text",
-        text: `Characters:\n${lines.join("\n")}`,
+        text: `Your characters (${allChars.length}):\n\n${lines.join("\n")}`,
       },
     ],
   };

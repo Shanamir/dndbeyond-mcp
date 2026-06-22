@@ -13,6 +13,7 @@ interface CookieEntry {
 interface AuthConfig {
   cobaltSession: string;
   cookies: CookieEntry[];
+  userId?: number;
   savedAt: string;
 }
 
@@ -39,11 +40,31 @@ export async function getAllCookies(): Promise<CookieEntry[]> {
 export async function saveAllCookies(cookies: CookieEntry[]): Promise<void> {
   await mkdir(CONFIG_DIR, { recursive: true });
   const cobalt = cookies.find((c) => c.name === "CobaltSession");
+  const userIdCookie = cookies.find((c) => c.name === "User.ID");
+  const userId = userIdCookie ? parseInt(userIdCookie.value, 10) : undefined;
+  // Preserve existing userId if not in new cookies
+  let existingUserId: number | undefined;
+  try {
+    const raw = await readFile(CONFIG_FILE, "utf-8");
+    existingUserId = (JSON.parse(raw) as AuthConfig).userId;
+  } catch { /* ignore */ }
   const config: AuthConfig = {
     cobaltSession: cobalt?.value || "",
     cookies,
+    userId: (!userId || isNaN(userId)) ? existingUserId : userId,
     savedAt: new Date().toISOString(),
   };
+  await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+}
+
+export async function saveUserId(userId: number): Promise<void> {
+  await mkdir(CONFIG_DIR, { recursive: true });
+  let config: AuthConfig = { cobaltSession: "", cookies: [], savedAt: new Date().toISOString() };
+  try {
+    const raw = await readFile(CONFIG_FILE, "utf-8");
+    config = JSON.parse(raw) as AuthConfig;
+  } catch { /* ignore */ }
+  config.userId = userId;
   await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
 }
 
@@ -74,11 +95,18 @@ export async function isAuthenticated(): Promise<boolean> {
 }
 
 export async function getUserId(): Promise<number | null> {
-  const cookies = await getAllCookies();
-  const userIdCookie = cookies.find((c) => c.name === "User.ID");
-  if (!userIdCookie) return null;
-  const parsed = parseInt(userIdCookie.value, 10);
-  return isNaN(parsed) ? null : parsed;
+  try {
+    const raw = await readFile(CONFIG_FILE, "utf-8");
+    const config: AuthConfig = JSON.parse(raw);
+    if (config.userId) return config.userId;
+    // Fall back to User.ID cookie
+    const userIdCookie = config.cookies?.find((c) => c.name === "User.ID");
+    if (userIdCookie) {
+      const parsed = parseInt(userIdCookie.value, 10);
+      if (!isNaN(parsed)) return parsed;
+    }
+  } catch { /* ignore */ }
+  return null;
 }
 
 const COBALT_TOKEN_URL = "https://auth-service.dndbeyond.com/v1/cobalt-token";
